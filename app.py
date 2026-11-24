@@ -32,6 +32,10 @@ elements = [
 ]
 
 shell_capacities = [2, 8, 18, 32, 32, 18, 8]
+approach_start_radius = 285
+contact_tolerance = 14
+landing_grace_seconds = 0.30
+
 difficulty_settings = {
     "쉬움": {"min_number": 1, "max_number": 10, "approach_seconds": 2.3, "orbit_speed": 1.5},
     "보통": {"min_number": 11, "max_number": 36, "approach_seconds": 1.6, "orbit_speed": 2.0},
@@ -43,20 +47,39 @@ def get_atoms(level):
     """난이도에 해당하는 원자 목록을 반환한다."""
     setting = difficulty_settings[level]
     atom_list = []
+
     for atom in elements:
         if setting["min_number"] <= atom[0] <= setting["max_number"]:
             atom_list.append(atom)
+
     return atom_list
 
 
 def get_shell_slot(electron_index):
     """전자 번호를 껍질 번호와 껍질 안의 슬롯 번호로 바꾼다."""
     remaining = electron_index
+
     for shell_index, capacity in enumerate(shell_capacities):
         if remaining < capacity:
             return shell_index, remaining, capacity
         remaining -= capacity
+
     return len(shell_capacities) - 1, 0, shell_capacities[-1]
+
+
+def shell_radius(shell_index):
+    """그림과 판정에 공통으로 사용하는 궤도 반지름이다."""
+    return 64 + 45 * shell_index
+
+
+def approach_distance(active, now):
+    """다가오는 전자와 원자핵 사이의 현재 거리를 반환한다."""
+    progress = min(
+        1.0,
+        max(0.0, (now - active["started"]) / active["duration"]),
+    )
+    radius = shell_radius(active["shell"])
+    return approach_start_radius - progress * (approach_start_radius - radius)
 
 
 def create_game(level):
@@ -88,14 +111,17 @@ def start_electron(now):
     shell_index, slot_index, capacity = get_shell_slot(game["electron_index"])
     angle = math.pi / 2 + slot_index * (2 * math.pi / capacity)
     speed = difficulty_settings[game["level"]]["approach_seconds"]
+
     game["active_electron"] = {
         "phase": "approach",
         "started": now,
         "duration": speed,
         "angle": angle,
+        "target_angle": angle,
         "shell": shell_index,
         "slot": slot_index,
         "capacity": capacity,
+        "landed_at": None,
         "orbit_started": None,
     }
 
@@ -103,7 +129,6 @@ def start_electron(now):
 def update_game_clock(now):
     """카운트다운과 전자 공전을 갱신하고, 세 바퀴가 지나면 목숨을 깎는다."""
     game = st.session_state.game
-    elapsed = max(0.0, now - game["last_update"])
     game["last_update"] = now
 
     if game["screen"] == "countdown":
@@ -118,12 +143,21 @@ def update_game_clock(now):
 
     if active["phase"] == "approach":
         if now - active["started"] >= active["duration"]:
+            active["phase"] = "landing"
+            active["landed_at"] = active["started"] + active["duration"]
+
+    elif active["phase"] == "landing":
+        if now - active["landed_at"] >= landing_grace_seconds:
             active["phase"] = "orbit"
             active["orbit_started"] = now
+
     elif active["phase"] == "orbit":
-        active["angle"] += difficulty_settings[game["level"]]["orbit_speed"] * elapsed
-        orbit_time = (6.2832 * 3) / difficulty_settings[game["level"]]["orbit_speed"]
-        if now - active["orbit_started"] >= orbit_time:
+        orbit_progress = difficulty_settings[game["level"]]["orbit_speed"] * (
+            now - active["orbit_started"]
+        )
+        active["angle"] = active["target_angle"] + orbit_progress
+
+        if orbit_progress >= 3 * 2 * math.pi:
             lose_life("전자 공전 3회 초과")
 
 
@@ -132,9 +166,11 @@ def lose_life(reason):
     game = st.session_state.game
     game["lives"] -= 1
     game["last_message"] = f"{reason}: 목숨 -1"
+
     if game["lives"] <= 0:
         game["screen"] = "ended"
         return
+
     start_electron(time.monotonic())
 
 
@@ -142,8 +178,11 @@ def place_electron(points):
     """전자 하나를 안착시키고 점수 및 원자 진행 상태를 갱신한다."""
     game = st.session_state.game
     active = game["active_electron"]
+
     game["score"] += points
-    game["occupied"].append((active["shell"], active["slot"], active["capacity"]))
+    game["occupied"].append(
+        (active["shell"], active["slot"], active["capacity"])
+    )
     game["electron_index"] += 1
     game["last_message"] = f"성공 +{points}점"
     game["active_electron"] = None
@@ -151,10 +190,12 @@ def place_electron(points):
     atom = current_atom()
     if game["electron_index"] >= atom[0]:
         game["atom_index"] += 1
+
         if game["atom_index"] >= len(game["atom_list"]):
             game["screen"] = "ended"
             game["completed"] = True
             return
+
         game["electron_index"] = 0
         game["occupied"] = []
         game["atom_started"] = time.monotonic()
@@ -174,16 +215,29 @@ def handle_click():
         return
 
     now = time.monotonic()
+
     if active["phase"] == "approach":
-        progress = (now - active["started"]) / active["duration"]
-        if 0.88 <= progress <= 1.05:
+        distance_to_shell = (
+            approach_distance(active, now) - shell_radius(active["shell"])
+        )
+
+        if distance_to_shell <= contact_tolerance:
             place_electron(3)
         else:
             lose_life("도착 타이밍을 놓침")
+
+    elif active["phase"] == "landing":
+        place_electron(3)
+
     elif active["phase"] == "orbit":
-        target_angle = math.pi / 2
-        difference = (active["angle"] - target_angle + math.pi) % (2 * math.pi) - math.pi
-        if abs(difference) <= 0.24:
+        target_angle = active["target_angle"]
+        orbit_progress = active["angle"] - target_angle
+        difference = (
+            (active["angle"] - target_angle + math.pi) % (2 * math.pi)
+            - math.pi
+        )
+
+        if orbit_progress >= 2 * math.pi - 0.18 and abs(difference) <= 0.18:
             place_electron(1)
         else:
             lose_life("궤도 타깃 밖에서 입력")
@@ -196,6 +250,7 @@ def render_orbit():
     active = game["active_electron"]
     now = time.monotonic()
     center = 310
+
     total = atom[0]
     shell_count = 0
     for capacity in shell_capacities:
@@ -203,30 +258,52 @@ def render_orbit():
         total -= capacity
         if total <= 0:
             break
-    radii = [64 + 45 * index for index in range(shell_count)]
+
+    radii = [shell_radius(index) for index in range(shell_count)]
 
     def point(angle, radius):
-        return center + radius * math.cos(angle), center - radius * math.sin(angle)
+        return (
+            center + radius * math.cos(angle),
+            center - radius * math.sin(angle),
+        )
 
     parts = [
-        '<svg xmlns="http://www.w3.org/2000/svg" width="620" height="620" viewBox="0 0 620 620">',
-        '<defs><radialGradient id="bg"><stop stop-color="#172b49"/><stop offset="1" stop-color="#07111f"/></radialGradient>',
-        '<radialGradient id="nucleus"><stop stop-color="#d4fff7"/><stop offset="0.5" stop-color="#57e5d1"/><stop offset="1" stop-color="#178a9a"/></radialGradient>',
-        '<filter id="glow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>',
+        '<svg xmlns="http://www.w3.org/2000/svg" width="620" '
+        'height="620" viewBox="0 0 620 620">',
+        '<defs><radialGradient id="bg">'
+        '<stop stop-color="#172b49"/>'
+        '<stop offset="1" stop-color="#07111f"/>'
+        '</radialGradient>',
+        '<radialGradient id="nucleus">'
+        '<stop stop-color="#d4fff7"/>'
+        '<stop offset="0.5" stop-color="#57e5d1"/>'
+        '<stop offset="1" stop-color="#178a9a"/>'
+        '</radialGradient>',
+        '<filter id="glow">'
+        '<feGaussianBlur stdDeviation="5" result="blur"/>'
+        '<feMerge><feMergeNode in="blur"/>'
+        '<feMergeNode in="SourceGraphic"/></feMerge>'
+        '</filter></defs>',
         '<rect width="620" height="620" rx="30" fill="url(#bg)"/>',
     ]
 
     for radius in radii:
         parts.append(
-            f'<circle cx="{center}" cy="{center}" r="{radius}" fill="none" '
-            'stroke="#496787" stroke-width="2" stroke-opacity="0.7"/>'
+            f'<circle cx="{center}" cy="{center}" r="{radius}" '
+            'fill="none" stroke="#496787" stroke-width="2" '
+            'stroke-opacity="0.7"/>'
         )
 
     # 이미 채운 전자들도 계속 공전한다.
     rotation = (now - game["atom_started"]) * 0.55
+
     for shell_index, slot_index, capacity in game["occupied"]:
         radius = radii[shell_index]
-        angle = math.pi / 2 + slot_index * (2 * math.pi / capacity) + rotation
+        angle = (
+            math.pi / 2
+            + slot_index * (2 * math.pi / capacity)
+            + rotation
+        )
         x, y = point(angle, radius)
         parts.append(
             f'<circle cx="{x:.2f}" cy="{y:.2f}" r="6" '
@@ -235,27 +312,24 @@ def render_orbit():
 
     if active is not None:
         radius = radii[active["shell"]]
-        target_angle = active["angle"] if active["phase"] == "approach" else math.pi / 2
+        target_angle = active["target_angle"]
+
+        # 초록 호는 처음 안착하는 위치에 고정된다.
         x1, y1 = point(target_angle - 0.18, radius)
         x2, y2 = point(target_angle + 0.18, radius)
         parts.append(
-            f'<path d="M {x1:.2f} {y1:.2f} A {radius} {radius} 0 0 0 {x2:.2f} {y2:.2f}" '
+            f'<path d="M {x1:.2f} {y1:.2f} '
+            f'A {radius} {radius} 0 0 0 {x2:.2f} {y2:.2f}" '
             'fill="none" stroke="#56efd1" stroke-width="9" '
             'stroke-linecap="round" filter="url(#glow)"/>'
         )
 
         if active["phase"] == "approach":
-            progress = min(
-                1.0,
-                max(0.0, (now - active["started"]) / active["duration"]),
-            )
-            distance = 285 - progress * (285 - radius)
-            angle = active["angle"]
+            distance = approach_distance(active, now)
         else:
             distance = radius
-            angle = active["angle"]
 
-        x, y = point(angle, distance)
+        x, y = point(active["angle"], distance)
         parts.append(
             f'<circle cx="{x:.2f}" cy="{y:.2f}" r="10" '
             'fill="#ffe5a1" filter="url(#glow)"/>'
@@ -266,26 +340,35 @@ def render_orbit():
         'fill="url(#nucleus)" filter="url(#glow)"/>'
     )
     parts.append(
-        f'<text x="{center}" y="{center + 10}" text-anchor="middle" '
-        f'font-family="sans-serif" font-size="28" font-weight="800" '
-        f'fill="#092030">{atom[1]}</text>'
+        f'<text x="{center}" y="{center + 10}" '
+        'text-anchor="middle" font-family="sans-serif" '
+        'font-size="28" font-weight="800" fill="#092030">'
+        f'{atom[1]}</text>'
     )
     parts.append("</svg>")
 
-    st.image("".join(parts), width=620, alt=f"{atom[2]} 원자와 전자껍질")
-    st.caption("파란 전자: 안착 후 공전 · 노란 전자: 현재 전자 · 초록 호: 클릭 타깃")
+    st.image(
+        "".join(parts),
+        width=620,
+        alt=f"{atom[2]} 원자와 전자껍질",
+    )
+    st.caption(
+        "파란 전자: 안착 후 공전 · 노란 전자: 현재 전자 · "
+        "초록 호: 처음 안착하고 다시 돌아오는 자리"
+    )
 
 
 def render_menu():
     st.title("⚛️ Shell Beat")
     st.subheader("전자껍질을 리듬에 맞춰 채워라")
     st.write(
-        "다가오는 전자가 궤도에 닿을 때 누르면 3점, "
-        "궤도를 돌며 타깃을 지날 때 누르면 1점입니다."
+        "전자가 초록 호에 처음 닿을 때 클릭하면 3점, "
+        "한 바퀴 이상 돌아 같은 호에 다시 닿을 때 클릭하면 1점입니다."
     )
 
     level = st.selectbox("난이도", list(difficulty_settings.keys()))
     st.caption("쉬움: H–Ne · 보통: Na–Kr · 어려움: Rb–U")
+
     if st.button("게임 시작", type="primary"):
         st.session_state.game = create_game(level)
         st.session_state.game["last_message"] = ""
@@ -313,13 +396,16 @@ def render_game():
             st.info("목숨을 모두 사용했습니다. 다시 도전해 보세요.")
 
         left, right = st.columns(2)
+
         if left.button("메뉴로 돌아가기"):
             st.session_state.screen = "menu"
             st.rerun()
+
         if right.button("다시 하기", type="primary"):
             st.session_state.game = create_game(game["level"])
             st.session_state.game["last_message"] = ""
             st.rerun()
+
         return
 
     atom = current_atom()
@@ -331,14 +417,19 @@ def render_game():
     )
 
     left, spacer, right = st.columns([1, 2, 1])
+
     with left:
         st.metric("목숨", "♥ " * game["lives"])
+
     with right:
         st.metric("현재 점수", game["score"])
         st.metric("다음 원소", next_symbol)
 
     st.subheader(f"{atom[2]} ({atom[1]}) · 원자번호 {atom[0]}")
-    st.write(f"전자 채우기: {min(game['electron_index'], atom[0])} / {atom[0]}")
+    st.write(
+        f"전자 채우기: "
+        f"{min(game['electron_index'], atom[0])} / {atom[0]}"
+    )
 
     if game["screen"] == "countdown":
         remaining = max(
@@ -360,8 +451,8 @@ def render_game():
             handle_click()
 
         st.caption(
-            "노란 전자가 궤도에 닿거나 초록 호를 지날 때 "
-            "버튼을 마우스로 클릭하세요."
+            "노란 전자가 초록 호에 처음 닿으면 3점, "
+            "한 바퀴 돌아 다시 닿으면 1점입니다."
         )
 
 
