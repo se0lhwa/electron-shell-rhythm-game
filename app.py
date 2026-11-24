@@ -72,6 +72,7 @@ def create_game(level):
         "screen": "countdown",
         "countdown_started": time.monotonic(),
         "last_update": time.monotonic(),
+        "atom_started": time.monotonic(),
         "active_electron": None,
     }
 
@@ -85,7 +86,7 @@ def start_electron(now):
     """현재 원자에 채울 다음 전자를 궤도 바깥에서 출발시킨다."""
     game = st.session_state.game
     shell_index, slot_index, capacity = get_shell_slot(game["electron_index"])
-    angle = -1.5708 + slot_index * (6.2832 / capacity)
+    angle = math.pi / 2 + slot_index * (2 * math.pi / capacity)
     speed = difficulty_settings[game["level"]]["approach_seconds"]
     game["active_electron"] = {
         "phase": "approach",
@@ -119,7 +120,6 @@ def update_game_clock(now):
         if now - active["started"] >= active["duration"]:
             active["phase"] = "orbit"
             active["orbit_started"] = now
-            active["angle"] = -1.5708
     elif active["phase"] == "orbit":
         active["angle"] += difficulty_settings[game["level"]]["orbit_speed"] * elapsed
         orbit_time = (6.2832 * 3) / difficulty_settings[game["level"]]["orbit_speed"]
@@ -157,12 +157,13 @@ def place_electron(points):
             return
         game["electron_index"] = 0
         game["occupied"] = []
+        game["atom_started"] = time.monotonic()
 
     start_electron(time.monotonic())
 
 
-def handle_spacebar():
-    """게임 버튼 입력을 판정한다. 버튼에 포커스한 뒤 스페이스바를 눌러도 작동한다."""
+def handle_click():
+    """마우스로 누른 전자 선택 버튼의 타이밍을 판정한다."""
     game = st.session_state.game
     if game["screen"] != "playing":
         return
@@ -180,8 +181,8 @@ def handle_spacebar():
         else:
             lose_life("도착 타이밍을 놓침")
     elif active["phase"] == "orbit":
-        target_angle = -1.5708
-        difference = (active["angle"] - target_angle + 3.1416) % 6.2832 - 3.1416
+        target_angle = math.pi / 2
+        difference = (active["angle"] - target_angle + math.pi) % (2 * math.pi) - math.pi
         if abs(difference) <= 0.24:
             place_electron(1)
         else:
@@ -189,69 +190,99 @@ def handle_spacebar():
 
 
 def render_orbit():
-    """Streamlit 텍스트 요소로 원자핵, 궤도, 전자를 그린다."""
+    """원자와 공전하는 전자를 SVG 도형으로 만들어 Streamlit에 표시한다."""
     game = st.session_state.game
     atom = current_atom()
     active = game["active_electron"]
-    size = 25
-    middle = size // 2
-    grid = [[" " for _ in range(size)] for _ in range(size)]
-
-    shell_count = 0
+    now = time.monotonic()
+    center = 310
     total = atom[0]
+    shell_count = 0
     for capacity in shell_capacities:
         shell_count += 1
         total -= capacity
         if total <= 0:
             break
-    shell_count = min(shell_count, len(shell_capacities))
-    radii = [2 + 2 * index for index in range(shell_count)]
+    radii = [64 + 45 * index for index in range(shell_count)]
+
+    def point(angle, radius):
+        return center + radius * math.cos(angle), center - radius * math.sin(angle)
+
+    parts = [
+        '<svg xmlns="http://www.w3.org/2000/svg" width="620" height="620" viewBox="0 0 620 620">',
+        '<defs><radialGradient id="bg"><stop stop-color="#172b49"/><stop offset="1" stop-color="#07111f"/></radialGradient>',
+        '<radialGradient id="nucleus"><stop stop-color="#d4fff7"/><stop offset="0.5" stop-color="#57e5d1"/><stop offset="1" stop-color="#178a9a"/></radialGradient>',
+        '<filter id="glow"><feGaussianBlur stdDeviation="5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>',
+        '<rect width="620" height="620" rx="30" fill="url(#bg)"/>',
+    ]
 
     for radius in radii:
-        for y in range(size):
-            for x in range(size):
-                distance = ((x - middle) ** 2 + (y - middle) ** 2) ** 0.5
-                if abs(distance - radius) < 0.48:
-                    grid[y][x] = "."
+        parts.append(
+            f'<circle cx="{center}" cy="{center}" r="{radius}" fill="none" '
+            'stroke="#496787" stroke-width="2" stroke-opacity="0.7"/>'
+        )
 
-    def put_at_angle(angle, radius, character):
-        x = round(middle + radius * math.cos(angle))
-        y = round(middle - radius * math.sin(angle))
-        if 0 <= x < size and 0 <= y < size:
-            grid[y][x] = character
-
-    # 궤도 위에 이미 안착한 전자
+    # 이미 채운 전자들도 계속 공전한다.
+    rotation = (now - game["atom_started"]) * 0.55
     for shell_index, slot_index, capacity in game["occupied"]:
-        radius = radii[min(shell_index, len(radii) - 1)]
-        angle = -1.5708 + slot_index * (6.2832 / capacity)
-        put_at_angle(angle, radius, "e")
+        radius = radii[shell_index]
+        angle = math.pi / 2 + slot_index * (2 * math.pi / capacity) + rotation
+        x, y = point(angle, radius)
+        parts.append(
+            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="6" '
+            'fill="#91b7ff" filter="url(#glow)"/>'
+        )
 
-    # 일부만 표시하는 타깃 호
     if active is not None:
-        target_shell = radii[min(active["shell"], len(radii) - 1)]
-        marker_angle = active["angle"] if active["phase"] == "approach" else -1.5708
-        put_at_angle(marker_angle, target_shell, "*")
+        radius = radii[active["shell"]]
+        target_angle = active["angle"] if active["phase"] == "approach" else math.pi / 2
+        x1, y1 = point(target_angle - 0.18, radius)
+        x2, y2 = point(target_angle + 0.18, radius)
+        parts.append(
+            f'<path d="M {x1:.2f} {y1:.2f} A {radius} {radius} 0 0 0 {x2:.2f} {y2:.2f}" '
+            'fill="none" stroke="#56efd1" stroke-width="9" '
+            'stroke-linecap="round" filter="url(#glow)"/>'
+        )
 
         if active["phase"] == "approach":
             progress = min(
                 1.0,
-                max(0.0, (time.monotonic() - active["started"]) / active["duration"]),
+                max(0.0, (now - active["started"]) / active["duration"]),
             )
-            distance = radii[-1] + 2 - progress * (radii[-1] + 2 - target_shell)
-            put_at_angle(active["angle"], distance, "o")
+            distance = 285 - progress * (285 - radius)
+            angle = active["angle"]
         else:
-            put_at_angle(active["angle"], target_shell, "o")
+            distance = radius
+            angle = active["angle"]
 
-    grid[middle][middle] = atom[1]
-    rows = [" ".join(row).rstrip() for row in grid]
-    st.code("\n".join(rows), language=None)
-    st.caption("원자핵은 가운데 원소 기호 · 궤도는 점선 · o 다가오는 전자 · e 안착한 전자 · * 타깃")
+        x, y = point(angle, distance)
+        parts.append(
+            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="10" '
+            'fill="#ffe5a1" filter="url(#glow)"/>'
+        )
+
+    parts.append(
+        f'<circle cx="{center}" cy="{center}" r="38" '
+        'fill="url(#nucleus)" filter="url(#glow)"/>'
+    )
+    parts.append(
+        f'<text x="{center}" y="{center + 10}" text-anchor="middle" '
+        f'font-family="sans-serif" font-size="28" font-weight="800" '
+        f'fill="#092030">{atom[1]}</text>'
+    )
+    parts.append("</svg>")
+
+    st.image("".join(parts), width=620, alt=f"{atom[2]} 원자와 전자껍질")
+    st.caption("파란 전자: 안착 후 공전 · 노란 전자: 현재 전자 · 초록 호: 클릭 타깃")
 
 
 def render_menu():
     st.title("⚛️ Shell Beat")
     st.subheader("전자껍질을 리듬에 맞춰 채워라")
-    st.write("다가오는 전자가 궤도에 닿을 때 누르면 3점, 궤도를 돌며 타깃을 지날 때 누르면 1점입니다.")
+    st.write(
+        "다가오는 전자가 궤도에 닿을 때 누르면 3점, "
+        "궤도를 돌며 타깃을 지날 때 누르면 1점입니다."
+    )
 
     level = st.selectbox("난이도", list(difficulty_settings.keys()))
     st.caption("쉬움: H–Ne · 보통: Na–Kr · 어려움: Rb–U")
@@ -275,10 +306,12 @@ def render_game():
     if game["screen"] == "ended":
         st.title("게임 종료")
         st.metric("최종 점수", game["score"])
+
         if game.get("completed", False):
             st.success("선택한 난이도의 모든 원소를 완성했습니다!")
         else:
             st.info("목숨을 모두 사용했습니다. 다시 도전해 보세요.")
+
         left, right = st.columns(2)
         if left.button("메뉴로 돌아가기"):
             st.session_state.screen = "menu"
@@ -308,20 +341,34 @@ def render_game():
     st.write(f"전자 채우기: {min(game['electron_index'], atom[0])} / {atom[0]}")
 
     if game["screen"] == "countdown":
-        remaining = max(1, 3 - int(time.monotonic() - game["countdown_started"]))
+        remaining = max(
+            1,
+            3 - int(time.monotonic() - game["countdown_started"]),
+        )
         st.info(f"시작까지 {remaining}초")
     else:
         render_orbit()
+
         if game.get("last_message"):
             st.caption(game["last_message"])
-        if st.button("SPACE · 전자 선택", type="primary", use_container_width=True):
-            handle_spacebar()
-        st.caption("버튼에 포커스를 둔 뒤 스페이스바를 눌러도 입력할 수 있습니다.")
+
+        if st.button(
+            "전자 선택 · 클릭",
+            type="primary",
+            use_container_width=True,
+        ):
+            handle_click()
+
+        st.caption(
+            "노란 전자가 궤도에 닿거나 초록 호를 지날 때 "
+            "버튼을 마우스로 클릭하세요."
+        )
 
 
 def main():
     if "screen" not in st.session_state:
         st.session_state.screen = "menu"
+
     if st.session_state.screen == "menu":
         render_menu()
     else:
