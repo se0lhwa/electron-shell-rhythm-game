@@ -504,6 +504,8 @@ SHELL_CAPACITIES = [2, 8, 18, 32, 32, 18, 8]
 APPROACH_START_RADIUS = 295
 CONTACT_TOLERANCE = 14
 LANDING_GRACE_SECONDS = 0.30
+ORBIT_ARC_HALF_ANGLE = 0.28  # 화면에 표시되는 초록 호의 절반 각도(rad)
+ORBIT_TOLERANCE = 0.38       # 1점 판정 허용 각도(rad, 지연 보정 포함)
 
 DIFFICULTY_SETTINGS = {
     "쉬움": {"min_number": 1, "max_number": 10, "approach_seconds": 2.3, "orbit_speed": 1.5},
@@ -708,7 +710,10 @@ def handle_click():
             - math.pi
         )
 
-        if orbit_progress >= 2 * math.pi - 0.18 and abs(difference) <= 0.18:
+        if (
+            orbit_progress >= 2 * math.pi - ORBIT_TOLERANCE
+            and abs(difference) <= ORBIT_TOLERANCE
+        ):
             place_electron(1)
         else:
             lose_life("궤도 타깃 밖에서 입력")
@@ -786,8 +791,8 @@ def render_orbit():
         target_angle = active["target_angle"]
 
         # 초록 호는 처음 안착하는 위치에 고정된다.
-        x1, y1 = point(target_angle - 0.18, radius)
-        x2, y2 = point(target_angle + 0.18, radius)
+        x1, y1 = point(target_angle - ORBIT_ARC_HALF_ANGLE, radius)
+        x2, y2 = point(target_angle + ORBIT_ARC_HALF_ANGLE, radius)
         parts.append(
             f'<path d="M {x1:.2f} {y1:.2f} '
             f'A {radius} {radius} 0 0 0 {x2:.2f} {y2:.2f}" '
